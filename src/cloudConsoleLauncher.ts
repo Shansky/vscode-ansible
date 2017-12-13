@@ -2,6 +2,8 @@ import * as request from 'request-promise';
 import * as WS from 'ws';
 import { setTimeout } from 'timers';
 import * as fsExtra from 'fs-extra';
+import * as path from 'path';
+import * as storage from 'azure-storage';
 
 const consoleApiVersion = '2017-08-01-preview';
 
@@ -113,9 +115,74 @@ export async function resetConsole(accessToken: string, armEndpoint: string) {
 	}
 }
 
-async function connectTerminal(accessToken: string, consoleUri: string, tempFilePath: string) {
-	console.log('Connecting terminal...');
+export async function ConnectTerminalAndUploadFile(accessToken: string, consoleUri: string, tempFile: string, files: string[]) {
+	const retry_interval = 500;
+	const retry_times = 30;
 
+	var storageConnStr = '';
+	var fileShareName = '';
+
+	const res = await connectCloudShell(accessToken, consoleUri);
+
+	const cmds = [
+		"resourceGroupNames=$(az group list --query [].name |tr -d '\"'  | grep cloud-shell-storage- | tr -d ,) \n",
+		"list=($resourceGroupNames) ; resourceGroupName=${list[0]} \n",
+		"storageName=$(az storage account list -g $resourceGroupName --query [0].name |tr -d '\"' ) \n",
+		"connectionStr=$(az storage account show-connection-string -g $resourceGroupName -n $storageName --query connectionString |tr -d '\"') \n",
+		"df -t cifs --output=source && echo connectionstring=$connectionStr \n"
+	];
+
+	const ws = connectSocket(res.socketUri, tempFile);
+
+	for (var m = 0; m < retry_times; m++) {
+		if (ws.readyState != ws.OPEN) {
+			await delay(retry_interval);
+		} else {
+			for (let cmd of cmds) {
+				ws.send(cmd);
+			}
+			if (fsExtra.existsSync(tempFile)) {
+				var regexp = new RegExp("Filesystem\\s[^](\\S+)\\s[^]connectionstring=(.*)\\s");
+
+				for (var i = 0; i < retry_times; i++) {
+					var content = fsExtra.readFileSync(tempFile);
+					var matches = regexp.exec(content);
+
+					if (matches && matches.length === 3) {
+						fileShareName = matches[1].substr(matches[1].lastIndexOf("/") + 1); // file share
+						storageConnStr = matches[2]; // storage connection string												
+						break;
+					} else {
+						await delay(retry_interval);
+					}
+				}
+				fsExtra.remove(tempFile);
+			}
+			break;
+		}
+	}
+
+	if (storageConnStr != '') {
+		// upload files through storage
+		uploadToAzureFileStorage(storageConnStr, files, fileShareName, 'playbook');
+	} else {
+		for (var m = 0; m < retry_times; m++) {
+			if (ws.readyState != ws.OPEN) {
+				await delay(retry_interval);
+			} else {
+				for (let file of files) {
+					var data = fsExtra.readFileSync(file, { encoding: 'utf8' }).toString();
+					ws.send('cd clouddrive && mkdir playbook \n');
+					ws.send('cd playbook && echo -e "' + escapeData(data) + '" > ' + path.basename(file) + ' \n');
+				}
+				break;
+			}
+		}
+	}
+}
+
+async function connectCloudShell(accessToken: string, consoleUri: string): Promise<any> {
+	console.log('Connecting terminal...');
 	for (let i = 0; i < 10; i++) {
 		const response = await initializeTerminal(accessToken, consoleUri);
 
@@ -131,36 +198,43 @@ async function connectTerminal(accessToken: string, consoleUri: string, tempFile
 			await delay(1000 * (i + 1));
 			console.log(`\x1b[AConnecting terminal...${'.'.repeat(i + 1)}`);
 			continue;
+		} else {
+			return response.body;
 		}
+	}
+	console.log('Failed to connect to the terminal.');
+}
 
-		const res = response.body;
-		const termId = res.id;
-		// terminalIdleTimeout = res.idleTimeout || terminalIdleTimeout;
-
-		const ws = connectSocket(res.socketUri);
-
-		if (tempFilePath) {
-			const retry_interval = 500;
-			const retry_times = 30;
-			for (var m = 0; m < retry_times; m++) {
-				if (ws.readyState != ws.OPEN) {
-					await delay(retry_interval);
-				} else {
-					fsExtra.writeFileSync(tempFilePath, Date.now() + ': cloud shell web socket opened.\n');
-					break;
-				}
-			}
-		}
-
-		process.stdout.on('resize', () => {
-			resize(accessToken, consoleUri, termId)
-				.catch(console.error);
-		});
-
-		return ws;
+async function connectTerminal(accessToken: string, consoleUri: string, tempFilePath: string) {
+	if (fsExtra.existsSync(tempFilePath)) {
+		fsExtra.removeSync(tempFilePath);
 	}
 
-	console.log('Failed to connect to the terminal.');
+	const res = await connectCloudShell(accessToken, consoleUri);
+	const termId = res.id;
+	// terminalIdleTimeout = res.idleTimeout || terminalIdleTimeout;
+
+	const ws = connectSocket(res.socketUri, null);
+
+	if (tempFilePath) {
+		const retry_interval = 500;
+		const retry_times = 30;
+		for (var m = 0; m < retry_times; m++) {
+			if (ws.readyState != ws.OPEN) {
+				await delay(retry_interval);
+			} else {
+				fsExtra.writeFileSync(tempFilePath, Date.now() + ': cloud shell web socket opened.\n');
+				break;
+			}
+		}
+	}
+
+	process.stdout.on('resize', () => {
+		resize(accessToken, consoleUri, termId)
+			.catch(console.error);
+	});
+
+	return ws;
 }
 
 async function initializeTerminal(accessToken: string, consoleUri: string) {
@@ -234,7 +308,33 @@ async function resize(accessToken: string, consoleUri: string, termId: string) {
 	console.log('Failed to resize terminal.');
 }
 
-function connectSocket(url: string) {
+
+function uploadToAzureFileStorage(connectionString: string, files: string[], share: string, folder: string) {
+	var client = storage.createFileService(connectionString);
+	client.createDirectoryIfNotExists(share, folder, (err, result, response) => {
+		if (err) {
+			return;
+		}
+
+		for (let file of files) {
+			client.createFileFromLocalFile(share, folder, path.basename(file), file, (err, result, response) => {
+				if (err) {
+					return;
+				}
+			})
+		}
+	});
+}
+
+function escapeData(data: string): string {
+	if (data) {
+		data = data.replace(/"/g, '\\"');
+	}
+
+	return data;
+}
+
+function connectSocket(url: string, file: string) {
 
 	const ws = new WS(url);
 
@@ -245,7 +345,11 @@ function connectSocket(url: string) {
 	});
 
 	ws.on('message', function (data) {
-		process.stdout.write(String(data));
+		if (file) {
+			fsExtra.appendFileSync(file, String(data));
+		} else {
+			process.stdout.write(String(data));
+		}
 	});
 
 	let error = false;

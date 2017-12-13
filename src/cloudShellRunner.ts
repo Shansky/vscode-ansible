@@ -60,10 +60,10 @@ export class CloudShellRunner extends BaseRunner {
                             count--;
                             if (count > 0) {
                                 if (fsExtra.existsSync(tempFile)) {
-                                    fsExtra.removeSync(tempFile);
+                                    fsExtra.remove(tempFile);
 
                                     terminal.sendText('export ' + Constants.UserAgentName + '=' + utilities.getUserAgent());
-                                    terminal.sendText('ansible-playbook ' + path.basename(playbook));
+                                    terminal.sendText('ansible-playbook ' + '~/clouddrive/playbook/' + path.basename(playbook));
                                     terminal.show();
 
                                     count = 0;

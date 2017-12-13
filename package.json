@@ -19,7 +19,7 @@
     "azure",
     "ansible module"
   ],
-  "aiKey": "",
+  "aiKey": "c0832760-3476-4e38-8ffc-32624202fcf1",
   "repository": {
     "url": "https://github.com/VSChina/vscode-ansible.git"
   },
@@ -99,6 +99,7 @@
   "dependencies": {
     "adal-node": "0.1.22",
     "azure-arm-resource": "^3.0.0-preview",
+    "azure-storage": "^2.6.0",
     "fs-extra": "^4.0.2",
     "ms-rest": "^2.2.7",
     "ms-rest-azure": "^2.4.5",

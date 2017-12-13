@@ -5,7 +5,7 @@
 
 import { window, commands, MessageItem, OutputChannel, Terminal, env } from 'vscode';
 import { AzureAccount, AzureSession } from './azure-account.api';
-import { getUserSettings, provisionConsole, Errors, resetConsole, delay, runInTerminal } from './cloudConsoleLauncher';
+import { getUserSettings, provisionConsole, Errors, resetConsole, delay, runInTerminal, ConnectTerminalAndUploadFile } from './cloudConsoleLauncher';
 import * as nls from 'vscode-nls';
 import * as path from 'path';
 import * as opn from 'opn';
@@ -96,23 +96,11 @@ export function openCloudConsole(api: AzureAccount, os: OS, files, outputChannel
 			shellArgs.shift();
 		}
 
-		let response = await runInTerminal(result.token.accessToken, consoleUri, '');
-
-		// upload files to cloudshell
-		const retry_interval = 500;
-		const retry_times = 30;
-		for (var i = 0; i < retry_times; i++) {
-			if (response.readyState != ws.OPEN) {
-				await delay(retry_interval);
-			} else {
-				for (let file of files) {
-					const data = fsExtra.readFileSync(file, { encoding: 'utf8' });
-					outputChannel.append(Constants.LineSeperator + '\nUpload playbook to CloudShell: ' + file + ' as ' + path.basename(file) + '\n');
-					response.send('echo -e "' + data + '" > ' + path.basename(file) + ' \n');
-				}
-				break;
-			}
+		const localTemp = path.join(__dirname, 'temp');
+		if (fsExtra.existsSync(localTemp)) {
+			fsExtra.removeSync(localTemp);
 		}
+		await ConnectTerminalAndUploadFile(result.token.accessToken, consoleUri, localTemp, files);
 
 		const terminal = window.createTerminal({
 			name: localize('azure-account.cloudConsole', "{0} in Cloud Shell", os.shellName),
